@@ -21,9 +21,13 @@ const NAV = [
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
-function Logo({ small = false }: { small?: boolean }) {
+/** Label that smoothly slides/fades away (instead of being clipped) when the sidebar collapses. */
+const fade = (show: boolean, gap = 'ml-3') =>
+  `overflow-hidden whitespace-nowrap transition-all duration-300 ease-out ${show ? `${gap} max-w-40 opacity-100` : 'ml-0 max-w-0 opacity-0'}`;
+
+function Logo({ small = false, iconOnly = false }: { small?: boolean; iconOnly?: boolean }) {
   return (
-    <Link to="/" className="flex items-center gap-2.5 font-extrabold tracking-tight" aria-label="Keyflow home">
+    <Link to="/" className="flex items-center font-extrabold tracking-tight" aria-label="Keyflow home">
       <svg viewBox="0 0 64 64" width={small ? 28 : 34} height={small ? 28 : 34} aria-hidden="true">
         <rect width="64" height="64" rx="16" fill="var(--surface-2)" />
         <rect x="11" y="38" width="12" height="12" rx="3" fill="var(--accent)" />
@@ -33,7 +37,7 @@ function Logo({ small = false }: { small?: boolean }) {
         <rect x="25" y="16" width="26" height="4" rx="2" fill="var(--text)" opacity=".9" />
         <rect x="25" y="24" width="16" height="4" rx="2" fill="var(--untyped)" />
       </svg>
-      <span className={small ? 'text-lg' : 'text-xl'}>Keyflow</span>
+      <span className={`${small ? 'text-lg' : 'text-xl'} ${fade(!iconOnly, 'ml-2.5')}`} aria-hidden={iconOnly}>Keyflow</span>
     </Link>
   );
 }
@@ -169,25 +173,26 @@ export function Layout() {
   return (
     <div className="flex min-h-dvh">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-[70] focus:rounded-lg focus:bg-accent focus:px-3 focus:py-2 focus:text-onaccent">Skip to content</a>
-      <aside className={`chrome sticky top-0 hidden h-dvh shrink-0 flex-col border-r border-line bg-surface/60 py-5 md:flex ${collapsed ? 'w-[72px] px-3' : 'w-60 px-4'}`}>
-        <div className={`mb-6 flex items-center ${collapsed ? 'justify-center' : 'px-2'}`}>
-          {collapsed ? <Logo small /> : <Logo />}
+      <aside className={`chrome sticky top-0 hidden h-dvh shrink-0 flex-col overflow-hidden border-r border-line bg-surface/60 px-3 py-5 md:flex ${collapsed ? 'w-[72px]' : 'w-60'}`} style={{ transition: 'width 300ms cubic-bezier(0.4, 0, 0.2, 1), opacity 400ms ease' }}>
+        <div className="mb-6 pl-[7px]">
+          <Logo iconOnly={collapsed} />
         </div>
         <nav className="flex flex-1 flex-col gap-1" aria-label="Main">
           {NAV.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to} to={to} end={end} title={collapsed ? label : undefined}
               className={({ isActive }) =>
-                `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${collapsed ? 'justify-center' : ''} ${isActive ? 'bg-surface2 text-accent' : 'text-muted hover:bg-surface2 hover:text-fg'}`
+                `flex items-center rounded-xl px-3.5 py-2.5 text-sm font-medium transition-colors ${isActive ? 'bg-surface2 text-accent' : 'text-muted hover:bg-surface2 hover:text-fg'}`
               }
             >
-              <Icon size={19} />
-              {!collapsed && label}
+              <Icon size={19} className="shrink-0" />
+              <span className={fade(!collapsed)}>{label}</span>
             </NavLink>
           ))}
         </nav>
-        <button className="chip justify-center" onClick={toggle} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
-          {collapsed ? <ChevronsRight size={18} /> : <><ChevronsLeft size={18} /> Collapse</>}
+        <button className="chip w-full !gap-0 !px-3.5" onClick={toggle} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>
+          {collapsed ? <ChevronsRight size={18} className="shrink-0" /> : <ChevronsLeft size={18} className="shrink-0" />}
+          <span className={fade(!collapsed, 'ml-2')}>Collapse</span>
         </button>
       </aside>
 
