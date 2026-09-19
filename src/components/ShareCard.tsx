@@ -30,11 +30,15 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
 async function draw(canvas: HTMLCanvasElement, d: ShareData) {
   const mono = '"JetBrains Mono Variable", ui-monospace, monospace';
   const sans = '"Inter Variable", system-ui, sans-serif';
+  // Wait briefly for the web fonts, but never let a slow/blocked font leave the card blank.
   try {
-    await Promise.all([
-      document.fonts.load(`800 120px ${mono}`),
-      document.fonts.load(`600 30px ${sans}`),
-      document.fonts.load(`400 30px ${sans}`),
+    await Promise.race([
+      Promise.all([
+        document.fonts.load(`800 120px ${mono}`),
+        document.fonts.load(`600 30px ${sans}`),
+        document.fonts.load(`400 30px ${sans}`),
+      ]),
+      new Promise((res) => setTimeout(res, 1500)),
     ]);
   } catch {
     /* fall back to system fonts */
@@ -43,6 +47,19 @@ async function draw(canvas: HTMLCanvasElement, d: ShareData) {
   if (!ctx) return;
   canvas.width = W;
   canvas.height = H;
+
+  // The production CSS minifier shortens colours (#33ff66 -> #3f6), so never build colours by
+  // string concatenation. Let the canvas normalise any CSS colour, then apply alpha explicitly.
+  const rgba = (color: string, alpha: number): string => {
+    ctx.fillStyle = '#000000';
+    ctx.fillStyle = color;
+    const n = String(ctx.fillStyle);
+    if (/^#[0-9a-f]{6}$/i.test(n)) {
+      const v = parseInt(n.slice(1), 16);
+      return `rgba(${(v >> 16) & 255}, ${(v >> 8) & 255}, ${v & 255}, ${alpha})`;
+    }
+    return n;
+  };
 
   const bg = cssVar('--bg', '#111318');
   const surface = cssVar('--surface', '#1a1d24');
@@ -57,21 +74,21 @@ async function draw(canvas: HTMLCanvasElement, d: ShareData) {
   ctx.fillRect(0, 0, W, H);
   // soft colour blobs
   const g1 = ctx.createRadialGradient(180, 120, 20, 180, 120, 520);
-  g1.addColorStop(0, accent + '55');
-  g1.addColorStop(1, 'transparent');
+  g1.addColorStop(0, rgba(accent, 0.33));
+  g1.addColorStop(1, rgba(accent, 0));
   ctx.fillStyle = g1;
   ctx.fillRect(0, 0, W, H);
   const g2 = ctx.createRadialGradient(1050, 540, 20, 1050, 540, 520);
-  g2.addColorStop(0, accent2 + '55');
-  g2.addColorStop(1, 'transparent');
+  g2.addColorStop(0, rgba(accent2, 0.33));
+  g2.addColorStop(1, rgba(accent2, 0));
   ctx.fillStyle = g2;
   ctx.fillRect(0, 0, W, H);
 
   // card
-  ctx.fillStyle = surface + 'cc';
+  ctx.fillStyle = rgba(surface, 0.8);
   roundRect(ctx, 48, 48, W - 96, H - 96, 36);
   ctx.fill();
-  ctx.strokeStyle = text + '22';
+  ctx.strokeStyle = rgba(text, 0.13);
   ctx.lineWidth = 2;
   ctx.stroke();
 
@@ -102,7 +119,7 @@ async function draw(canvas: HTMLCanvasElement, d: ShareData) {
   const pill = (x: number, y: number, label: string, color: string, textColor?: string, solid = false) => {
     ctx.font = `700 28px ${sans}`;
     const w = ctx.measureText(label).width + 48;
-    ctx.fillStyle = solid ? color : color + '2a';
+    ctx.fillStyle = solid ? color : rgba(color, 0.16);
     roundRect(ctx, x - w, y, w, 56, 28);
     ctx.fill();
     ctx.fillStyle = textColor ?? color;
@@ -150,11 +167,9 @@ export function ShareCard({ data }: { data: ShareData }) {
   const key = JSON.stringify(data);
 
   useEffect(() => {
-    let alive = true;
-    if (ref.current) void draw(ref.current, data).then(() => alive);
-    return () => {
-      alive = false;
-    };
+    if (ref.current) {
+      draw(ref.current, data).catch(() => setError('Could not draw the result card in this browser.'));
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 
