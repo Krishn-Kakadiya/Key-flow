@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Keyflow — Find your flow. One keystroke at a time.</title>
+    <meta name="description" content="Keyflow is a typing app you actually want to open every day: timed tests, storybook typing, touch-typing lessons, daily challenges and streaks." />
+    <meta name="theme-color" content="#111318" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="apple-touch-icon" href="./pwa-192.png" />
+    <script>
+      // Apply the saved theme before first paint (avoids a flash of the wrong theme).
+      try {
+        var raw = localStorage.getItem('keyflow:v1');
+        if (raw) {
+          var s = JSON.parse(raw).state;
+          if (s && s.settings) {
+            if (s.settings.theme) document.documentElement.dataset.theme = s.settings.theme;
+            if (s.settings.reducedMotion === 'on') document.documentElement.classList.add('motion-off');
+          }
+        }
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <noscript>Keyflow needs JavaScript to run.</noscript>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
