@@ -242,6 +242,23 @@ describe('content & generators', () => {
     }
   });
 
+  it('library stories (cricket, adventure, growth) have chapters of 1000+ words', () => {
+    const long = STORIES.filter((s) => ['cricket', 'adventure', 'growth'].includes(s.category));
+    expect(long.length).toBeGreaterThan(0);
+    for (const s of long) {
+      s.chapters.forEach((c, i) => {
+        const words = c.text.split(/\s+/).length;
+        expect(words, `${s.title} / chapter ${i + 1} "${c.title}" has only ${words} words`).toBeGreaterThanOrEqual(1000);
+      });
+    }
+  });
+
+  it('newest stories are listed first', () => {
+    const dates = STORIES.map((s) => s.added ?? '');
+    const sorted = [...dates].sort((a, b) => b.localeCompare(a));
+    expect(dates).toEqual(sorted);
+  });
+
   it('every lesson generates non-empty, typeable text using only unlocked keys', () => {
     for (const l of LESSONS) {
       const t = lessonText(l, seeded(7));
