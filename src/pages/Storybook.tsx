@@ -52,7 +52,7 @@ export function StoriesPage() {
 
   const list = STORIES.filter((s) => cat === 'all' || s.category === cat);
   const shelf = STORIES.filter((s) => stories[s.id]?.completedAt);
-  const cats: ('all' | StoryCategory)[] = ['all', 'fables', 'classics', 'scifi', 'calm'];
+  const cats: ('all' | StoryCategory)[] = ['all', 'cricket', 'fables', 'classics', 'scifi', 'adventure', 'growth', 'calm'];
 
   return (
     <div>

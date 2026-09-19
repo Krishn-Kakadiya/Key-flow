@@ -120,22 +120,22 @@ describe('completeSession — the single source of truth for rewards', () => {
   });
 
   it('stories: finishing a chapter unlocks the next; finishing all completes the book once', () => {
-    const story = STORIES[3]; // Pride and Prejudice (2 chapters)
+    const story = STORIES.find((x) => x.id === 'pride')!;
+    const last = story.chapters.length - 1;
     const store = useStore.getState();
-    const first = store.completeSession({
-      result: run(story.chapters[0].text), mode: 'story', modeKey: `story-${story.id}-0`, ref: { type: 'story', storyId: story.id, chapter: 0 },
-    });
+    const play = (chapter: number) =>
+      store.completeSession({
+        result: run(story.chapters[chapter].text), mode: 'story', modeKey: `story-${story.id}-${chapter}`,
+        ref: { type: 'story', storyId: story.id, chapter },
+      });
+    const first = play(0);
     expect(first.chapterUnlocked).toBe(true);
     expect(first.bookCompleted).toBe(false);
-    const second = store.completeSession({
-      result: run(story.chapters[1].text), mode: 'story', modeKey: `story-${story.id}-1`, ref: { type: 'story', storyId: story.id, chapter: 1 },
-    });
-    expect(second.bookCompleted).toBe(true);
+    for (let c = 1; c < last; c++) expect(play(c).bookCompleted).toBe(false);
+    const finalChapter = play(last);
+    expect(finalChapter.bookCompleted).toBe(true);
     expect(useStore.getState().stories[story.id].completedAt).not.toBeNull();
-    const again = store.completeSession({
-      result: run(story.chapters[1].text), mode: 'story', modeKey: `story-${story.id}-1`, ref: { type: 'story', storyId: story.id, chapter: 1 },
-    });
-    expect(again.bookCompleted).toBe(false);
+    expect(play(last).bookCompleted).toBe(false);
   });
 
   it(`lessons pass at ${PASS_ACCURACY}% accuracy and award stars`, () => {
@@ -229,6 +229,16 @@ describe('content & generators', () => {
         // eslint-disable-next-line no-control-regex
         expect(/^[\x20-\x7E]+$/.test(c.text), `${s.id}/${c.title}`).toBe(true);
       }
+    }
+  });
+
+  it('every book is at least 1500 characters and ids are unique', () => {
+    const ids = new Set<string>();
+    for (const s of STORIES) {
+      expect(ids.has(s.id), `duplicate id ${s.id}`).toBe(false);
+      ids.add(s.id);
+      const total = s.chapters.reduce((a, c) => a + c.text.length, 0);
+      expect(total, `${s.title} has only ${total} characters`).toBeGreaterThanOrEqual(1500);
     }
   });
 
