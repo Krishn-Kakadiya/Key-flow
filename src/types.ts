@@ -1,5 +1,6 @@
 import type { Streak } from './lib/progress';
 import type { CodeLang } from './data/code';
+import type { EngineSnapshot } from './lib/engine';
 
 export type Mode =
   | 'time'
@@ -131,6 +132,18 @@ export interface ChallengeRecord {
   bestAccuracy: number;
 }
 
+/** A story chapter that was stopped part-way; lets the reader resume where they left off. */
+export interface Draft {
+  key: string;
+  /** hash of the chapter text, so an edited chapter never resumes from a stale position */
+  sig: number;
+  savedAt: number;
+  textLength: number;
+  /** active typing time already credited to the daily goal / streak */
+  creditedMs: number;
+  snapshot: EngineSnapshot;
+}
+
 /** Everything that gets persisted / exported. */
 export interface Data {
   profile: Profile;
@@ -145,6 +158,7 @@ export interface Data {
   challenges: Record<string, ChallengeRecord>;
   totals: Totals;
   minutesByDate: Record<string, number>;
+  drafts: Record<string, Draft>;
 }
 
 export interface Reward {

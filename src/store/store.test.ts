@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { sanitize, defaultData } from './defaults';
 import { LESSONS, lessonText, PASS_ACCURACY } from '../data/lessons';
 import { STORIES } from '../data/stories';
-import { seeded } from '../lib/rng';
+import { seeded, hashString } from '../lib/rng';
 import { challengeFor, challengeSpec } from '../lib/challenge';
 import { generateWords, weakKeyText, rankWeakKeys } from '../lib/text';
 import { keyInfo, KEY_ROWS } from '../lib/fingers';
@@ -19,8 +19,8 @@ const mem = new Map<string, string>();
   length: 0,
 } as Storage;
 
-const { useStore } = await import('./index');
-const { createEngine, typeChar, finalize } = await import('../lib/engine');
+const { useStore, getStoryDraft, storyDraftKey } = await import('./index');
+const { createEngine, typeChar, finalize, snapshot, restoreEngine } = await import('../lib/engine');
 
 function run(text: string, opts: { errorEvery?: number; gap?: number } = {}) {
   let s = createEngine(text);
@@ -311,5 +311,80 @@ describe('content & generators', () => {
     expect(/[.?!]/.test(t)).toBe(true);
     expect(/\d/.test(t)).toBe(true);
     expect(t.split(' ')).toHaveLength(60);
+  });
+});
+
+describe('saving a long chapter part-way (drafts)', () => {
+  const story = STORIES.find((x) => x.id === 'last-over')!;
+  const text = story.chapters[0].text;
+  const key = storyDraftKey(story.id, 0);
+  const sig = hashString(text);
+
+  const typeTo = (from: ReturnType<typeof createEngine>, start: number, end: number, t0: number) => {
+    let e = from;
+    for (let i = start; i < end; i++) e = typeChar(e, text[i], t0 + (i - start) * 150);
+    return e;
+  };
+
+  it('saving keeps your place, credits the time and streak, and completing clears the draft', () => {
+    const store = useStore.getState();
+    const first = typeTo(createEngine(text), 0, 400, 1000);
+    const snap1 = JSON.parse(JSON.stringify(snapshot(first, 400 * 150))); // 60 s of typing
+    const saved = store.saveDraft(key, sig, text.length, snap1);
+    expect(saved.streakIncremented).toBe(true);
+    expect(useStore.getState().streak.current).toBe(1);
+    expect(getStoryDraft(useStore.getState(), story.id, 0)?.snapshot.typed.length).toBe(400);
+    const today = toDateStr();
+    expect(useStore.getState().minutesByDate[today]).toBeCloseTo(1, 1);
+    // saving again later only credits the extra time (no double counting)
+    const second = typeTo(restoreEngine(text, snap1, 5_000_000), 400, 800, 5_000_000);
+    store.saveDraft(key, sig, text.length, JSON.parse(JSON.stringify(snapshot(second, 800 * 150))));
+    expect(useStore.getState().minutesByDate[today]).toBeCloseTo(2, 1);
+    expect(Object.keys(useStore.getState().drafts)).toEqual([key]);
+    expect(useStore.getState().streak.current).toBe(1); // once per day
+
+    // finish the chapter from the saved spot: full-chapter stats, draft removed, time not double counted
+    const snap2 = JSON.parse(JSON.stringify(useStore.getState().drafts[key].snapshot));
+    const done = typeTo(restoreEngine(text, snap2, 9_000_000), 800, text.length, 9_000_000);
+    expect(done.finishedAt).not.toBeNull();
+    const result = finalize(done, done.finishedAt!);
+    expect(result.charsTyped).toBe(text.length);
+    expect(result.accuracy).toBe(100);
+    const r = useStore.getState().completeSession({
+      result, mode: 'story', modeKey: `story-${story.id}-0`, ref: { type: 'story', storyId: story.id, chapter: 0 },
+    });
+    expect(r.counted).toBe(true);
+    expect(useStore.getState().drafts[key]).toBeUndefined();
+    expect(useStore.getState().minutesByDate[today]).toBeCloseTo(result.durationSec / 60, 1);
+  });
+
+  it('a draft for edited chapter text is ignored, and a finished-looking draft is ignored', () => {
+    const e = typeTo(createEngine(text), 0, 100, 0);
+    const snap = snapshot(e, 15000);
+    useStore.getState().saveDraft(key, sig + 1, text.length, snap); // wrong signature
+    expect(getStoryDraft(useStore.getState(), story.id, 0)).toBeNull();
+    useStore.getState().saveDraft(key, sig, text.length, snap);
+    expect(getStoryDraft(useStore.getState(), story.id, 0)).not.toBeNull();
+  });
+
+  it('corrupt drafts are dropped when loading saved data, valid ones survive export and import', () => {
+    const d = sanitize({ drafts: { a: 5, b: { snapshot: { typed: '' } }, c: { snapshot: { typed: 'hello', words: 'x', snaps: [1, 'x', 3] } } } });
+    expect(Object.keys(d.drafts)).toEqual(['c']);
+    expect(d.drafts.c.snapshot.snaps).toEqual([1, 3]);
+    expect(d.drafts.c.snapshot.words).toEqual([]);
+
+    const e = typeTo(createEngine(text), 0, 200, 0);
+    useStore.getState().saveDraft(key, sig, text.length, snapshot(e, 30000));
+    const json = useStore.getState().exportData();
+    useStore.getState().resetAll();
+    expect(useStore.getState().drafts).toEqual({});
+    expect(useStore.getState().importData(json)).toEqual({ ok: true });
+    expect(getStoryDraft(useStore.getState(), story.id, 0)?.snapshot.typed.length).toBe(200);
+  });
+
+  it('only keeps the 20 most recent drafts', () => {
+    const e = typeTo(createEngine(text), 0, 60, 0);
+    for (let i = 0; i < 25; i++) useStore.getState().saveDraft(`story:x:${i}`, 1, 5000, snapshot(e, 9000));
+    expect(Object.keys(useStore.getState().drafts).length).toBe(20);
   });
 });

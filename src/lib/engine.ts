@@ -57,6 +57,17 @@ export interface EngineState {
   autoIndent: boolean;
   /** ms since start at which the text was completed */
   finishedAt: number | null;
+  /** present when a saved run was resumed: what happened before `events` begins */
+  base?: EngineBase;
+}
+
+/** History carried over from an earlier sitting when a run is resumed. */
+export interface EngineBase {
+  /** was each already-typed character correct? */
+  okAt: boolean[];
+  /** cumulative correct characters at each whole second of the earlier sitting */
+  snaps: number[];
+  elapsedMs: number;
 }
 
 export interface EngineOptions {
@@ -264,11 +275,11 @@ export interface EngineResult {
 const round1 = (n: number) => Math.round(n * 10) / 10;
 
 /** Replay the event log to get cumulative correct chars at each whole second. */
-export function correctAtSeconds(events: Ev[], totalMs: number): number[] {
-  const okAt: boolean[] = [];
-  let correct = 0;
-  const snaps: number[] = [];
-  let boundary = 1000;
+export function correctAtSeconds(events: Ev[], totalMs: number, base?: EngineBase): number[] {
+  const okAt: boolean[] = base ? base.okAt.slice() : [];
+  let correct = okAt.reduce((n, ok) => n + (ok ? 1 : 0), 0);
+  const snaps: number[] = base ? base.snaps.slice() : [];
+  let boundary = (snaps.length + 1) * 1000;
   for (const ev of events) {
     if (ev.t > totalMs) break;
     while (boundary <= ev.t) {
@@ -295,10 +306,78 @@ export function correctAtSeconds(events: Ev[], totalMs: number): number[] {
   return snaps;
 }
 
+/* ───────────── save & resume ───────────── */
+
+/** Compact, JSON-safe picture of a run in progress. Small enough to keep in localStorage. */
+export interface EngineSnapshot {
+  typed: string;
+  /** active typing time so far (pauses excluded) */
+  elapsedMs: number;
+  keystrokes: number;
+  correctKeystrokes: number;
+  errors: number;
+  correct: number;
+  maxCombo: number;
+  keyErrors: Record<string, number>;
+  keyHits: Record<string, number>;
+  keyMs: Record<string, number>;
+  /** [endIdx, t, chars] per completed word (powers consistency) */
+  words: Array<[number, number, number]>;
+  /** cumulative correct chars at each whole second (powers the speed graph) */
+  snaps: number[];
+  autoRanges: Array<[number, number]>;
+}
+
+export function snapshot(s: EngineState, elapsedMs: number): EngineSnapshot {
+  return {
+    typed: s.typed,
+    elapsedMs,
+    keystrokes: s.keystrokes,
+    correctKeystrokes: s.correctKeystrokes,
+    errors: s.errors,
+    correct: s.correct,
+    maxCombo: s.maxCombo,
+    keyErrors: s.keyErrors,
+    keyHits: s.keyHits,
+    keyMs: s.keyMs,
+    words: s.words.map((w) => [w.endIdx, w.t, w.chars]),
+    snaps: correctAtSeconds(s.events, elapsedMs, s.base),
+    autoRanges: s.autoRanges,
+  };
+}
+
+/**
+ * Rebuild an engine from a snapshot. `now` is the active-clock time of the restore; the
+ * clock is treated as if the earlier sitting had just been running, so the timer carries on
+ * from the saved elapsed time (time spent away is never counted).
+ */
+export function restoreEngine(target: string, snap: EngineSnapshot, now: number, opts: EngineOptions = {}): EngineState {
+  const typed = snap.typed.slice(0, target.length);
+  const okAt = Array.from({ length: typed.length }, (_, i) => typed[i] === target[i]);
+  return {
+    ...createEngine(target, opts),
+    typed,
+    startedAt: now - snap.elapsedMs,
+    keystrokes: snap.keystrokes,
+    correctKeystrokes: snap.correctKeystrokes,
+    errors: snap.errors,
+    correct: okAt.reduce((n, ok) => n + (ok ? 1 : 0), 0),
+    combo: 0,
+    maxCombo: snap.maxCombo,
+    keyErrors: { ...snap.keyErrors },
+    keyHits: { ...snap.keyHits },
+    keyMs: { ...snap.keyMs },
+    lastKeyT: null,
+    words: snap.words.map(([endIdx, t, chars]) => ({ endIdx, t, chars })),
+    autoRanges: snap.autoRanges.map(([a, b]) => [a, b] as [number, number]),
+    base: { okAt, snaps: snap.snaps.slice(), elapsedMs: snap.elapsedMs },
+  };
+}
+
 export function finalize(s: EngineState, durationMs: number): EngineResult {
   const dur = Math.max(durationMs, 1);
   const minutes = Math.max(dur, MIN_WINDOW_MS) / 60000;
-  const snaps = correctAtSeconds(s.events, dur);
+  const snaps = correctAtSeconds(s.events, dur, s.base);
 
   const step = Math.max(1, Math.ceil(snaps.length / 240));
   const wpmSeries: number[] = [];

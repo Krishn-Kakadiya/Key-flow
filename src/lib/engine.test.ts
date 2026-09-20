@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   backspace, createEngine, finalize, liveMetrics, typeChar, normalizeText, ghostChars, consistencyFromWords, extendTarget,
+  snapshot, restoreEngine,
   type EngineState,
 } from './engine';
 
@@ -192,5 +193,70 @@ describe('normalizeText', () => {
   });
   it('keeps newlines for code', () => {
     expect(normalizeText('a  \nb\r\nc', { keepNewlines: true })).toBe('a\nb\nc');
+  });
+});
+
+describe('save & resume', () => {
+  const target = 'the quick brown fox jumps over the lazy dog and keeps running far away. '.repeat(12).trim();
+  type Op = { k: 'c'; ch: string } | { k: 'b' };
+  // typed with mistakes: one wrong key just before the save point, fixed right after resuming
+  const buildOps = (splitAt: number): Op[] => {
+    const ops: Op[] = [];
+    for (let i = 0; i < splitAt - 1; i++) ops.push({ k: 'c', ch: target[i] });
+    ops.push({ k: 'c', ch: '#' }); // wrong key, still uncorrected when saved
+    ops.push({ k: 'b' });
+    ops.push({ k: 'c', ch: target[splitAt - 1] });
+    for (let i = splitAt; i < target.length; i++) ops.push({ k: 'c', ch: target[i] });
+    return ops;
+  };
+  const apply = (st: EngineState, op: Op, t: number) => (op.k === 'c' ? typeChar(st, op.ch, t) : backspace(st, t));
+
+  it('a run saved halfway and resumed later scores like one typed straight through', () => {
+    const split = 300;
+    const ops = buildOps(split);
+    const gap = 100;
+
+    let straight = createEngine(target);
+    ops.forEach((op, i) => (straight = apply(straight, op, 1000 + i * gap)));
+    const expected = finalize(straight, straight.finishedAt!);
+
+    // sitting one: stop right after the wrong key (index `split - 1` of ops), i.e. with an error on screen
+    const m = split; // ops[0..m-1] applied (the last one is the wrong '#')
+    let first = createEngine(target);
+    ops.slice(0, m).forEach((op, i) => (first = apply(first, op, 1000 + i * gap)));
+    const saved = JSON.parse(JSON.stringify(snapshot(first, m * gap)));
+
+    // sitting two: much later, on a fresh clock
+    let resumed = restoreEngine(target, saved, 9_999_000);
+    expect(resumed.typed).toBe(first.typed);
+    ops.slice(m).forEach((op, i) => (resumed = apply(resumed, op, 9_999_000 + i * gap)));
+    const got = finalize(resumed, resumed.finishedAt!);
+
+    for (const k of ['netWpm', 'rawWpm', 'accuracy', 'consistency', 'charsTyped', 'correctChars', 'errors', 'keystrokes', 'durationSec', 'seriesStep'] as const) {
+      expect(got[k], k).toBe(expected[k]);
+    }
+    expect(got.wpmSeries).toEqual(expected.wpmSeries);
+    expect(got.cumChars).toEqual(expected.cumChars);
+  });
+
+  it('resuming never counts the time spent away and keeps the timer running from the saved time', () => {
+    let s = createEngine(target);
+    for (let i = 0; i < 40; i++) s = typeChar(s, target[i], 1000 + i * 200);
+    const snap = snapshot(s, 8000);
+    const r = restoreEngine(target, snap, 5_000_000);
+    expect(5_000_000 - r.startedAt!).toBe(8000);
+    // saving again straight after a restore round-trips
+    const again = snapshot(r, 8000);
+    expect(again.typed).toBe(snap.typed);
+    expect(again.snaps).toEqual(snap.snaps);
+    expect(again.words).toEqual(snap.words);
+  });
+
+  it('snapshots survive JSON and stay small for a long run', () => {
+    let s = createEngine(target, { endOnComplete: false });
+    for (let i = 0; i < 700; i++) s = typeChar(s, target[i % target.length], i * 250);
+    const snap = snapshot(s, 700 * 250);
+    expect(snap.snaps.length).toBe(Math.floor((700 * 250) / 1000));
+    expect(JSON.stringify(snap).length).toBeLessThan(40_000);
   });
 });

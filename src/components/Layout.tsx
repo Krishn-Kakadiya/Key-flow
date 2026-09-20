@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
-  BarChart3, BookOpen, ChevronsLeft, ChevronsRight, GraduationCap, Home, Keyboard, Palette, Settings, Trophy, Zap, X,
+  BarChart3, BookOpen, Check, ChevronsLeft, ChevronsRight, GraduationCap, Home, Keyboard, Palette, Settings, Trophy, Zap, X,
 } from 'lucide-react';
 import { useStore } from '../store';
 import { useUi } from '../store/ui';
@@ -134,6 +134,31 @@ function LevelUpOverlay() {
   );
 }
 
+/** Small confirmation message ("Progress saved") that clears itself after a few seconds. */
+function Notice() {
+  const notice = useUi((s) => s.notice);
+  const clear = useUi((s) => s.clearNotice);
+  useEffect(() => {
+    if (!notice) return;
+    const id = window.setTimeout(clear, 4500);
+    return () => window.clearTimeout(id);
+  }, [notice, clear]);
+  if (!notice) return null;
+  return (
+    <div className="pointer-events-none fixed inset-x-0 bottom-20 z-[65] flex justify-center px-4 md:bottom-8" role="status" aria-live="polite">
+      <motion.div
+        key={notice.id}
+        initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}
+        className="pointer-events-auto flex max-w-md items-center gap-2.5 rounded-xl border border-line bg-surface px-4 py-3 text-sm font-medium shadow-2xl"
+      >
+        <span className="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-success/20 text-success"><Check size={14} strokeWidth={3} /></span>
+        <span>{notice.text}</span>
+        <button className="chip !p-1" onClick={clear} aria-label="Dismiss"><X size={14} /></button>
+      </motion.div>
+    </div>
+  );
+}
+
 function MobileHint() {
   const hidden = useStore((s) => s.settings.hideMobileHint);
   const set = useStore((s) => s.setSettings);
@@ -223,6 +248,7 @@ export function Layout() {
       </nav>
 
       <LevelUpOverlay />
+      <Notice />
     </div>
   );
 }

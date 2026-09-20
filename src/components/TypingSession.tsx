@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { motion } from 'framer-motion';
-import { Pause, Play, RotateCcw, Flag, LogOut, MousePointerClick } from 'lucide-react';
+import { Pause, Play, RotateCcw, Flag, LogOut, MousePointerClick, Save } from 'lucide-react';
 import {
-  backspace, createEngine, extendTarget, finalize, ghostChars, liveMetrics, typeChar,
-  type EngineResult, type EngineState,
+  backspace, createEngine, extendTarget, finalize, ghostChars, liveMetrics, restoreEngine, snapshot, typeChar,
+  type EngineResult, type EngineSnapshot, type EngineState,
 } from '../lib/engine';
 import { TypingText } from './TypingText';
 import { KeyboardVisual, Hands } from './KeyboardVisual';
 import { playCountdown, playChime, playError, playKey } from '../lib/audio';
 import { useUi } from '../store/ui';
+import { Modal } from './ui';
 import type { Ghost } from '../types';
 
 export interface KeyboardOpts {
@@ -34,7 +35,20 @@ interface Props {
   /** reported to the parent so it can guard navigation */
   onProgress?: (inProgress: boolean) => void;
   hint?: ReactNode;
+  /** long texts (story chapters) can be stopped and saved, then resumed later */
+  saveable?: boolean;
+  /** a saved run to resume; the session starts paused so the clock waits for the first key */
+  resumeFrom?: EngineSnapshot | null;
+  /** called with a snapshot whenever progress is saved (Stop & save, on a timer, or when the tab is hidden) */
+  onSaveDraft?: (snap: EngineSnapshot) => void;
+  /** called after the reader chose "Stop & save" (the parent should leave the page) */
+  onStopped?: () => void;
+  /** lets the parent trigger a save, e.g. from the "leave this page?" dialog */
+  registerSave?: (save: (() => void) | null) => void;
 }
+
+/** Nothing is worth saving until this many characters have been typed. */
+const MIN_SAVE_CHARS = 30;
 
 const fmt = (ms: number) => {
   const s = Math.floor(ms / 1000);
@@ -44,12 +58,20 @@ const fmt = (ms: number) => {
 /** One typing run: input handling, pause/resume, live stats, sounds, ghost. */
 export function TypingSession({
   text, timeLimit, extendWords, autoIndent, ghost, countdown, zen, keyboard, onFinish, onRestart, onQuit, onProgress, hint,
+  saveable = false, resumeFrom = null, onSaveDraft, onStopped, registerSave,
 }: Props) {
-  const initial = useMemo(() => createEngine(text, { endOnComplete: !timeLimit, autoIndent }), [text, timeLimit, autoIndent]);
-  const [eng, setEng] = useState<EngineState>(initial);
-  const engRef = useRef<EngineState>(initial);
-  const [elapsed, setElapsed] = useState(0);
-  const [paused, setPaused] = useState(false);
+  // A resumed run starts paused: the clock is frozen at the saved time until the first key press.
+  const [init] = useState(() => {
+    const t0 = performance.now();
+    const opts = { endOnComplete: !timeLimit, autoIndent };
+    return { t0, engine: resumeFrom ? restoreEngine(text, resumeFrom, t0, opts) : createEngine(text, opts) };
+  });
+  const [eng, setEng] = useState<EngineState>(init.engine);
+  const engRef = useRef<EngineState>(init.engine);
+  const [elapsed, setElapsed] = useState(resumeFrom?.elapsedMs ?? 0);
+  const [paused, setPaused] = useState(!!resumeFrom);
+  const [welcome, setWelcome] = useState(!!resumeFrom);
+  const [confirmRestart, setConfirmRestart] = useState(false);
   const [done, setDone] = useState(false);
   const [focused, setFocused] = useState(false);
   const [idle, setIdle] = useState(true);
@@ -58,7 +80,8 @@ export function TypingSession({
   const [comboPulse, setComboPulse] = useState(0);
 
   const inputRef = useRef<HTMLInputElement>(null);
-  const pauseRef = useRef<{ at: number | null; total: number }>({ at: null, total: 0 });
+  const pauseRef = useRef<{ at: number | null; total: number }>({ at: resumeFrom ? init.t0 : null, total: 0 });
+  const lastSaved = useRef(resumeFrom ? `${resumeFrom.keystrokes}:${resumeFrom.typed.length}` : '');
   const doneRef = useRef(false);
   const idleTimer = useRef<number>(0);
   const mistakeTimer = useRef<number>(0);
@@ -67,24 +90,27 @@ export function TypingSession({
   const clock = useCallback(() => (pauseRef.current.at ?? performance.now()) - pauseRef.current.total, []);
   const started = eng.startedAt !== null;
   const running = started && !done;
-  const locked = count !== null && count >= 0;
+  const countdownActive = count !== null && count >= 0;
+  const locked = countdownActive || confirmRestart;
+  // a resumed run only counts as "in progress" once something new has been typed
+  const dirty = !resumeFrom || eng.keystrokes > resumeFrom.keystrokes || eng.typed.length !== resumeFrom.typed.length;
 
   /* keep parent / global chrome informed */
   useEffect(() => {
-    onProgress?.(running);
+    onProgress?.(running && dirty);
     setTyping(running && !paused);
     return () => setTyping(false);
-  }, [running, paused, onProgress, setTyping]);
+  }, [running, dirty, paused, onProgress, setTyping]);
 
   useEffect(() => {
-    if (!running) return;
+    if (!running || saveable) return; // saveable runs are kept safe by autosave instead of a warning
     const warn = (e: BeforeUnloadEvent) => {
       e.preventDefault();
       e.returnValue = '';
     };
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
-  }, [running]);
+  }, [running, saveable]);
 
   const finish = useCallback(
     (state: EngineState, durationMs: number) => {
@@ -108,8 +134,52 @@ export function TypingSession({
     pauseRef.current.total += performance.now() - pauseRef.current.at;
     pauseRef.current.at = null;
     setPaused(false);
+    setWelcome(false);
     inputRef.current?.focus();
   }, []);
+
+  /* ───── save & resume ───── */
+  const saveNow = useCallback((): boolean => {
+    const st = engRef.current;
+    if (!saveable || !onSaveDraft || st.startedAt === null || doneRef.current || st.typed.length < MIN_SAVE_CHARS) return false;
+    const sig = `${st.keystrokes}:${st.typed.length}`;
+    if (sig === lastSaved.current) return true; // nothing new since the last save
+    onSaveDraft(snapshot(st, clock() - st.startedAt));
+    lastSaved.current = sig;
+    return true;
+  }, [saveable, onSaveDraft, clock]);
+
+  const stopAndSave = useCallback(() => {
+    if (saveNow()) onStopped?.();
+  }, [saveNow, onStopped]);
+
+  useEffect(() => {
+    registerSave?.(saveable ? () => void saveNow() : null);
+    return () => registerSave?.(null);
+  }, [registerSave, saveable, saveNow]);
+
+  // Autosave every 30 s of typing, and whenever the page is hidden or closed.
+  useEffect(() => {
+    if (!saveable) return;
+    const id = window.setInterval(() => {
+      if (pauseRef.current.at === null) saveNow();
+    }, 30_000);
+    const onHide = () => void saveNow();
+    const onVis = () => document.hidden && void saveNow();
+    window.addEventListener('pagehide', onHide);
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      window.clearInterval(id);
+      window.removeEventListener('pagehide', onHide);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [saveable, saveNow]);
+
+  /** Restart needs a confirmation once real progress exists on a long text. */
+  const requestRestart = useCallback(() => {
+    if (saveable && engRef.current.typed.length > 150) setConfirmRestart(true);
+    else onRestart();
+  }, [saveable, onRestart]);
 
   /* focus the hidden input */
   useEffect(() => {
@@ -215,7 +285,7 @@ export function TypingSession({
     }
     if (e.key === 'Tab') {
       e.preventDefault();
-      onRestart();
+      requestRestart();
       return;
     }
     if (e.key === 'Escape') {
@@ -272,6 +342,8 @@ export function TypingSession({
   const pct = eng.target.length ? eng.typed.length / eng.target.length : 0;
   const wpm = m.netWpm;
   const zenOpacity = Math.min(0.62, 0.14 + (wpm / 110) * 0.5);
+  const minutesLeft = Math.max(1, Math.round((eng.target.length - eng.typed.length) / 5 / Math.max(15, wpm)));
+  const canSave = saveable && started && !done && !welcome && eng.typed.length >= MIN_SAVE_CHARS;
 
   return (
     <div className="relative" style={zen ? ({ ['--zen-o' as string]: zenOpacity } as React.CSSProperties) : undefined}>
@@ -288,6 +360,7 @@ export function TypingSession({
             <Stat label="WPM" value={started ? Math.round(m.netWpm) : '–'} />
             <Stat label="Accuracy" value={started ? `${Math.round(m.accuracy)}%` : '–'} />
             <Stat label="Errors" value={started ? m.errors : '–'} className="hidden sm:block" />
+            {saveable && started && <Stat label="Left" value={`~${minutesLeft} min`} className="hidden sm:block" />}
           </div>
           <div className="flex items-center gap-3">
             {eng.combo >= 10 && (
@@ -348,18 +421,30 @@ export function TypingSession({
             {paused && (
               <motion.div
                 initial={{ opacity: 0 }} animate={{ opacity: 1 }}
-                className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3"
+                className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 px-4 text-center"
               >
-                <div className="flex items-center gap-2 text-lg font-semibold"><Pause size={20} /> Paused</div>
-                <div className="text-sm text-muted">The clock is stopped. Press any key to continue.</div>
-                <div className="flex gap-2">
-                  <button className="btn btn-primary" onClick={resume}><Play size={16} /> Resume</button>
-                  <button className="btn btn-ghost" onClick={onRestart}><RotateCcw size={16} /> Restart</button>
-                  {onQuit && <button className="btn btn-ghost" onClick={onQuit}><LogOut size={16} /> Quit</button>}
+                {welcome ? (
+                  <>
+                    <div className="flex items-center gap-2 text-lg font-semibold"><Save size={20} /> Welcome back</div>
+                    <div className="max-w-md text-sm text-muted">
+                      Your place is saved: <strong className="text-fg">{Math.round(pct * 100)}%</strong> through this chapter ({eng.typed.length.toLocaleString()} of {eng.target.length.toLocaleString()} characters). Press any key to carry on where you stopped.
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="flex items-center gap-2 text-lg font-semibold"><Pause size={20} /> Paused</div>
+                    <div className="text-sm text-muted">The clock is stopped. Press any key to continue.</div>
+                  </>
+                )}
+                <div className="flex flex-wrap justify-center gap-2">
+                  <button className="btn btn-primary" onClick={resume}><Play size={16} /> {welcome ? 'Continue' : 'Resume'}</button>
+                  {canSave && !welcome && <button className="btn btn-ghost" onClick={stopAndSave}><Save size={16} /> Save &amp; exit</button>}
+                  <button className="btn btn-ghost" onClick={requestRestart}><RotateCcw size={16} /> {welcome ? 'Start over' : 'Restart'}</button>
+                  {onQuit && <button className="btn btn-ghost" onClick={onQuit}><LogOut size={16} /> {welcome ? 'Back' : 'Quit'}</button>}
                 </div>
               </motion.div>
             )}
-            {locked && (
+            {countdownActive && (
               <motion.div
                 key={count}
                 initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1 }}
@@ -384,7 +469,12 @@ export function TypingSession({
           <div className="flex items-center gap-3">
             <span className="hidden sm:inline"><kbd className="rounded bg-surface2 px-1.5 py-0.5">Tab</kbd> restart</span>
             <span className="hidden sm:inline"><kbd className="rounded bg-surface2 px-1.5 py-0.5">Esc</kbd> pause</span>
-            <button className="chip !px-2 !py-1" onClick={onRestart}><RotateCcw size={14} /> Restart</button>
+            {canSave && (
+              <button className="btn btn-ghost !px-3 !py-1.5 !text-xs" onClick={stopAndSave} title="Save your place and come back to finish later">
+                <Save size={14} /> Stop &amp; save
+              </button>
+            )}
+            <button className="chip !px-2 !py-1" onClick={requestRestart}><RotateCcw size={14} /> Restart</button>
           </div>
         </div>
 
@@ -395,6 +485,20 @@ export function TypingSession({
           </div>
         )}
       </div>
+
+      <Modal
+        open={confirmRestart}
+        onClose={() => setConfirmRestart(false)}
+        title="Start this chapter over?"
+        actions={
+          <>
+            <button className="btn btn-ghost" onClick={() => setConfirmRestart(false)}>Keep going</button>
+            <button className="btn btn-danger" onClick={() => { setConfirmRestart(false); onRestart(); }}>Start over</button>
+          </>
+        }
+      >
+        You have typed {eng.typed.length.toLocaleString()} characters ({Math.round(pct * 100)}%). Starting over erases this progress, including anything you saved earlier.
+      </Modal>
     </div>
   );
 }

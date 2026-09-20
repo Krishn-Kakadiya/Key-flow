@@ -51,6 +51,13 @@ Drop a new file into `src/data/library/` (copy any existing one) and it appears 
 Set `category`, `added: 'YYYY-MM-DD'` (newest stories are listed first) and write chapters with plain keyboard characters only.
 Chapters in the Cricket, Adventure and Growth categories must be at least 1,000 words; `npm test` enforces this.
 
+## Long chapters: stop, save and resume
+
+Story chapters of 1,500+ characters can be stopped and resumed. **Stop & save** (also in the pause menu and the leave-page dialog)
+keeps your exact place; it also autosaves every 30 seconds and when the tab is hidden or closed. Reopening the chapter shows
+"Welcome back" with the timer frozen until you press a key. Time typed counts toward the daily goal and streak when you save,
+and the finished chapter is scored as one run across all sittings. Drafts live in localStorage (max 20) and are included in export/import.
+
 ## Project layout
 
 ```

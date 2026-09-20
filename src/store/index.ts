@@ -1,13 +1,14 @@
 import { create } from 'zustand';
 import { persist, type StateStorage, createJSONStorage } from 'zustand/middleware';
-import type { Data, Mode, Prefs, Reward, Session, SessionRef, Settings } from '../types';
-import type { EngineResult } from '../lib/engine';
-import { defaultData, sanitize, SCHEMA_VERSION, MAX_SESSIONS, MAX_FREEZES, FREEZE_COST, newId } from './defaults';
+import type { Data, Draft, Mode, Prefs, Reward, Session, SessionRef, Settings } from '../types';
+import type { EngineResult, EngineSnapshot } from '../lib/engine';
+import { defaultData, sanitize, SCHEMA_VERSION, MAX_SESSIONS, MAX_FREEZES, MAX_DRAFTS, FREEZE_COST, newId } from './defaults';
 import { toDateStr } from '../lib/date';
 import { advanceStreak, computeXp, levelFromXp, effectiveStreak } from '../lib/progress';
 import { evaluateBadges, type BadgeCtx } from '../lib/badges';
 import { LESSONS, PASS_ACCURACY, starsFor } from '../data/lessons';
 import { STORIES } from '../data/stories';
+import { hashString } from '../lib/rng';
 import { challengeGoalMet } from '../lib/challenge';
 import { newlyUnlocked, unlockedThemes } from '../lib/themes';
 
@@ -50,6 +51,9 @@ export interface SessionInput {
 
 export interface Actions {
   completeSession: (input: SessionInput) => Reward;
+  /** Save (or update) a chapter that was stopped part-way. Counts the time typed toward today's goal and streak. */
+  saveDraft: (key: string, sig: number, textLength: number, snapshot: EngineSnapshot) => { streak: number; streakIncremented: boolean };
+  discardDraft: (key: string) => void;
   setSettings: (patch: Partial<Settings>) => void;
   setPrefs: (patch: Partial<Prefs>) => void;
   setDailyGoal: (minutes: number) => void;
@@ -64,7 +68,7 @@ export type Store = Data & Actions;
 
 const DATA_KEYS: (keyof Data)[] = [
   'profile', 'settings', 'prefs', 'streak', 'sessions', 'records', 'badges',
-  'stories', 'lessons', 'challenges', 'totals', 'minutesByDate',
+  'stories', 'lessons', 'challenges', 'totals', 'minutesByDate', 'drafts',
 ];
 
 function pickData(s: Store): Data {
@@ -91,6 +95,46 @@ export const useStore = create<Store>()(
             dailyGoalMinutes: goalMinutes ?? s.profile.dailyGoalMinutes,
           },
         })),
+
+      saveDraft: (key, sig, textLength, snap) => {
+        const s = get();
+        const today = toDateStr();
+        const prev = s.drafts[key];
+        const creditedMs = prev?.creditedMs ?? 0;
+        const deltaMs = Math.max(0, snap.elapsedMs - creditedMs);
+        const sittingCorrect = Math.max(0, snap.correct - (prev?.snapshot.correct ?? 0));
+
+        // Progress made in this sitting counts for today, exactly like a finished session would.
+        let streak = s.streak;
+        let profile = s.profile;
+        let incremented = false;
+        if (sittingCorrect >= 15) {
+          const adv = advanceStreak(s.streak, today, s.profile.streakFreezes);
+          let freezes = adv.freezesLeft;
+          if (adv.incremented && adv.streak.current % 7 === 0 && freezes < MAX_FREEZES) freezes += 1;
+          streak = adv.streak;
+          profile = { ...s.profile, streakFreezes: freezes };
+          incremented = adv.incremented;
+        }
+        const minutesByDate = { ...s.minutesByDate, [today]: (s.minutesByDate[today] ?? 0) + deltaMs / 60000 };
+
+        const draft: Draft = { key, sig, savedAt: Date.now(), textLength, creditedMs: Math.max(creditedMs, snap.elapsedMs), snapshot: snap };
+        const drafts = { ...s.drafts, [key]: draft };
+        const keys = Object.keys(drafts);
+        if (keys.length > MAX_DRAFTS) {
+          keys.sort((a, b) => drafts[b].savedAt - drafts[a].savedAt);
+          for (const k of keys.slice(MAX_DRAFTS)) delete drafts[k];
+        }
+        set({ drafts, streak, profile, minutesByDate });
+        return { streak: streak.current, streakIncremented: incremented };
+      },
+
+      discardDraft: (key) => {
+        if (!get().drafts[key]) return;
+        const drafts = { ...get().drafts };
+        delete drafts[key];
+        set({ drafts });
+      },
 
       buyFreeze: () => {
         const s = get();
@@ -278,7 +322,11 @@ export const useStore = create<Store>()(
           zenSeconds: s.totals.zenSeconds + (input.mode === 'zen' ? r.durationSec : 0),
           keyStats,
         };
-        const minutesByDate = { ...s.minutesByDate, [today]: (s.minutesByDate[today] ?? 0) + r.durationSec / 60 };
+        const draftKey = input.ref?.type === 'story' ? storyDraftKey(input.ref.storyId, input.ref.chapter) : null;
+        const alreadyCreditedSec = draftKey ? (s.drafts[draftKey]?.creditedMs ?? 0) / 1000 : 0;
+        const minutesByDate = { ...s.minutesByDate, [today]: (s.minutesByDate[today] ?? 0) + Math.max(0, r.durationSec - alreadyCreditedSec) / 60 };
+        const drafts = { ...s.drafts };
+        if (draftKey) delete drafts[draftKey];
 
         /* badges */
         const passedLessons = Object.values(lessons).filter((l) => l.passed).length;
@@ -325,6 +373,7 @@ export const useStore = create<Store>()(
           challenges,
           totals,
           minutesByDate,
+          drafts,
         });
 
         return {
@@ -380,6 +429,21 @@ export function currentLevel(d: Pick<Data, 'profile'>): number {
 
 export function availableThemeIds(d: Pick<Data, 'profile'>): string[] {
   return unlockedThemes(currentLevel(d)).map((t) => t.id);
+}
+
+export const storyDraftKey = (storyId: string, chapter: number) => `story:${storyId}:${chapter}`;
+
+/** Chapters at least this long can be stopped and saved. */
+export const SAVE_MIN_CHARS = 1500;
+
+/** A saved chapter draft, only if it still matches the current chapter text. */
+export function getStoryDraft(d: Pick<Data, 'drafts'>, storyId: string, chapter: number): Draft | null {
+  const story = STORIES.find((x) => x.id === storyId);
+  const text = story?.chapters[chapter]?.text;
+  const draft = d.drafts[storyDraftKey(storyId, chapter)];
+  if (!text || !draft) return null;
+  if (draft.sig !== hashString(text) || draft.snapshot.typed.length >= text.length) return null;
+  return draft;
 }
 
 /** Highest unlocked chapter index for a story. */

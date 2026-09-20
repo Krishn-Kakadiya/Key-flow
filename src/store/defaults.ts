@@ -1,10 +1,11 @@
-import type { Data, Prefs, Profile, Records, Settings, Totals } from '../types';
+import type { Data, Draft, Prefs, Profile, Records, Settings, Totals } from '../types';
 import { emptyStreak, type Streak } from '../lib/progress';
 import { isValidDateStr } from '../lib/date';
 import { THEMES, DEFAULT_THEME } from '../lib/themes';
 
 export const SCHEMA_VERSION = 1;
 export const MAX_SESSIONS = 400;
+export const MAX_DRAFTS = 20;
 export const MAX_FREEZES = 3;
 export const FREEZE_COST = 150;
 
@@ -79,6 +80,7 @@ export function defaultData(): Data {
     challenges: {},
     totals: defaultTotals(),
     minutesByDate: {},
+    drafts: {},
   };
 }
 
@@ -97,6 +99,44 @@ const numRecord = (v: unknown): Record<string, number> => {
   if (isObj(v)) for (const [k, n] of Object.entries(v)) if (typeof n === 'number' && Number.isFinite(n)) out[k] = n;
   return out;
 };
+
+const triples = (v: unknown, limit: number): Array<[number, number, number]> =>
+  Array.isArray(v)
+    ? (v.filter((w) => Array.isArray(w) && w.length === 3 && w.every((n) => typeof n === 'number' && Number.isFinite(n))).slice(0, limit) as Array<[number, number, number]>)
+    : [];
+
+const pairs = (v: unknown, limit: number): Array<[number, number]> =>
+  Array.isArray(v)
+    ? (v.filter((w) => Array.isArray(w) && w.length === 2 && w.every((n) => typeof n === 'number' && Number.isFinite(n))).slice(0, limit) as Array<[number, number]>)
+    : [];
+
+function cleanDraft(key: string, v: unknown): Draft | null {
+  if (!isObj(v) || !isObj(v.snapshot)) return null;
+  const sn = v.snapshot;
+  if (typeof sn.typed !== 'string' || sn.typed.length === 0 || sn.typed.length > 40000) return null;
+  return {
+    key,
+    sig: num(v.sig, 0),
+    savedAt: num(v.savedAt, 0),
+    textLength: num(v.textLength, sn.typed.length, 1),
+    creditedMs: num(v.creditedMs, 0, 0),
+    snapshot: {
+      typed: sn.typed,
+      elapsedMs: num(sn.elapsedMs, 0, 0),
+      keystrokes: Math.floor(num(sn.keystrokes, 0, 0)),
+      correctKeystrokes: Math.floor(num(sn.correctKeystrokes, 0, 0)),
+      errors: Math.floor(num(sn.errors, 0, 0)),
+      correct: Math.floor(num(sn.correct, 0, 0)),
+      maxCombo: Math.floor(num(sn.maxCombo, 0, 0)),
+      keyErrors: numRecord(sn.keyErrors),
+      keyHits: numRecord(sn.keyHits),
+      keyMs: numRecord(sn.keyMs),
+      words: triples(sn.words, 8000),
+      snaps: numArray(sn.snaps, 20000),
+      autoRanges: pairs(sn.autoRanges, 2000),
+    },
+  };
+}
 
 function cleanSession(v: unknown): Data['sessions'][number] | null {
   if (!isObj(v)) return null;
@@ -277,6 +317,16 @@ export function sanitize(raw: unknown): Data {
     for (const [date, m] of Object.entries(raw.minutesByDate)) {
       if (isValidDateStr(date) && typeof m === 'number' && Number.isFinite(m)) d.minutesByDate[date] = m;
     }
+  }
+
+  if (isObj(raw.drafts)) {
+    const list: Draft[] = [];
+    for (const [key, v] of Object.entries(raw.drafts)) {
+      const dr = cleanDraft(key, v);
+      if (dr) list.push(dr);
+    }
+    list.sort((a, b) => b.savedAt - a.savedAt);
+    for (const dr of list.slice(0, MAX_DRAFTS)) d.drafts[dr.key] = dr;
   }
 
   return d;

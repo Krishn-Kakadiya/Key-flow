@@ -1,8 +1,9 @@
 import { useMemo, useState } from 'react';
 import { Link, Navigate, useNavigate, useParams } from 'react-router-dom';
 import { motion } from 'framer-motion';
-import { ArrowLeft, ArrowRight, BookOpen, Check, Clock, Lock, Library, Trophy } from 'lucide-react';
-import { useStore, unlockedChapter } from '../store';
+import { ArrowLeft, ArrowRight, BookOpen, Check, Clock, Lock, Library, Save, Trophy } from 'lucide-react';
+import { useStore, unlockedChapter, getStoryDraft, storyDraftKey, SAVE_MIN_CHARS } from '../store';
+import { hashString } from '../lib/rng';
 import { CATEGORY_LABEL, STORIES, getStory, storyChars, type Story, type StoryCategory } from '../data/stories';
 import { PageHeader } from '../components/ui';
 import { SessionRunner } from '../components/SessionRunner';
@@ -50,6 +51,22 @@ export function StoriesPage() {
     return { story: started.s, next };
   }, [stories]);
 
+  const drafts = useStore((s) => s.drafts);
+  /** the most recently saved, still-valid chapter draft */
+  const resumeItem = useMemo(() => {
+    let best: { story: Story; chapter: number; pct: number; savedAt: number; minutesLeft: number } | null = null;
+    for (const story of STORIES) {
+      for (let i = 0; i < story.chapters.length; i++) {
+        const c = story.chapters[i];
+        const d = getStoryDraft({ drafts }, story.id, i);
+        if (!d || (best && d.savedAt <= best.savedAt)) continue;
+        const left = Math.max(1, Math.round((c.text.length - d.snapshot.typed.length) / 5 / Math.max(15, wpm)));
+        best = { story, chapter: i, pct: d.snapshot.typed.length / c.text.length, savedAt: d.savedAt, minutesLeft: left };
+      }
+    }
+    return best;
+  }, [drafts, wpm]);
+
   const list = STORIES.filter((s) => cat === 'all' || s.category === cat);
   const shelf = STORIES.filter((s) => stories[s.id]?.completedAt);
   const cats: ('all' | StoryCategory)[] = ['all', 'cricket', 'fables', 'classics', 'scifi', 'adventure', 'growth', 'calm'];
@@ -58,7 +75,28 @@ export function StoriesPage() {
     <div>
       <PageHeader title="Storybook" subtitle="Type your way through a story, one chapter at a time. Finish a chapter to unlock the next." />
 
-      {continueReading && (
+      {resumeItem && (
+        <Link
+          to={`/stories/${resumeItem.story.id}/${resumeItem.chapter}`}
+          className="card mb-6 flex items-center gap-4 border-accent/40 p-4 transition hover:bg-surface2"
+        >
+          <Cover story={resumeItem.story} className="h-24 w-[72px] shrink-0" />
+          <div className="min-w-0 flex-1">
+            <div className="label flex items-center gap-1 !text-accent"><Save size={13} /> Saved - pick up where you stopped</div>
+            <div className="truncate text-lg font-bold">{resumeItem.story.title}</div>
+            <div className="truncate text-sm text-muted">Chapter {resumeItem.chapter + 1}: {resumeItem.story.chapters[resumeItem.chapter].title}</div>
+            <div className="mt-2 flex items-center gap-3">
+              <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface2" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(resumeItem.pct * 100)} aria-label="Saved progress in this chapter">
+                <div className="h-full rounded-full bg-accent" style={{ width: `${resumeItem.pct * 100}%` }} />
+              </div>
+              <span className="text-xs text-muted tabular">{Math.round(resumeItem.pct * 100)}% - about {resumeItem.minutesLeft} min left</span>
+            </div>
+          </div>
+          <span className="btn btn-primary hidden sm:inline-flex">Resume <ArrowRight size={16} /></span>
+        </Link>
+      )}
+
+      {!resumeItem && continueReading && (
         <Link to={`/stories/${continueReading.story.id}/${continueReading.next}`} className="card mb-6 flex items-center gap-4 p-4 transition hover:bg-surface2">
           <Cover story={continueReading.story} className="h-24 w-[72px] shrink-0" />
           <div className="min-w-0 flex-1">
@@ -162,6 +200,8 @@ export function StoryPage() {
           const isDone = p?.completedChapters.includes(i);
           const locked = i > unlocked;
           const st = p?.stats[i];
+          const dr = isDone ? null : getStoryDraft(data, story.id, i);
+          const drPct = dr ? Math.round((dr.snapshot.typed.length / c.text.length) * 100) : 0;
           const inner = (
             <div className={`card flex items-center gap-4 p-4 ${locked ? 'opacity-60' : 'transition hover:bg-surface2'}`}>
               <div className={`grid h-10 w-10 shrink-0 place-items-center rounded-full text-sm font-bold ${isDone ? 'bg-success/20 text-success' : locked ? 'bg-surface2 text-untyped' : 'bg-accent/15 text-accent'}`}>
@@ -172,7 +212,13 @@ export function StoryPage() {
                 <div className="text-xs text-muted">
                   {c.text.length} characters · ~{estMinutes(c.text.length, wpm)} min
                   {st && <> · best <strong className="text-fg">{Math.round(st.wpm)} WPM</strong> at {Math.round(st.accuracy)}%</>}
+                  {dr && <span className="ml-1 inline-flex items-center gap-1 font-semibold text-accent">· <Save size={11} /> Saved at {drPct}% - resume</span>}
                 </div>
+                {dr && (
+                  <div className="mt-2 h-1 overflow-hidden rounded-full bg-surface2" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={drPct} aria-label={`Saved progress in ${c.title}`}>
+                    <div className="h-full rounded-full bg-accent" style={{ width: `${drPct}%` }} />
+                  </div>
+                )}
               </div>
               {!locked && <ArrowRight size={18} className="text-muted" />}
               {locked && <span className="text-xs text-muted">Finish chapter {i} to unlock</span>}
@@ -190,20 +236,38 @@ export function ChapterPage() {
   const navigate = useNavigate();
   const story = getStory(id);
   const data = useStore();
+  const discardDraft = useStore((s) => s.discardDraft);
   const [run, setRun] = useState(0);
   const n = Number(chapter);
+  // Read once per (re)start: later autosaves must not swap the snapshot under a running session.
+  const savedDraft = useMemo(
+    () => (story && Number.isInteger(n) ? getStoryDraft(useStore.getState(), story.id, n) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [story, n, run],
+  );
 
   if (!story || !Number.isInteger(n) || n < 0 || n >= story.chapters.length) return <Navigate to="/stories" replace />;
   if (n > unlockedChapter(data, story.id)) return <Navigate to={`/stories/${story.id}`} replace />;
 
   const ch = story.chapters[n];
   const hasNext = n + 1 < story.chapters.length;
+  const saveable = ch.text.length >= SAVE_MIN_CHARS;
+  const draftKey = storyDraftKey(story.id, n);
   const spec = {
     text: ch.text,
     mode: 'story' as const,
     modeKey: `story-${story.id}-${n}`,
     ref: { type: 'story' as const, storyId: story.id, chapter: n },
     label: `${story.title} · Chapter ${n + 1}`,
+    draft: saveable
+      ? {
+          key: draftKey,
+          sig: hashString(ch.text),
+          textLength: ch.text.length,
+          resume: savedDraft?.snapshot ?? null,
+          onStopped: () => navigate(`/stories/${story.id}`),
+        }
+      : undefined,
   };
 
   return (
@@ -230,9 +294,18 @@ export function ChapterPage() {
         <SessionRunner
           key={`${n}-${run}`}
           spec={spec}
-          onRestart={() => setRun((r) => r + 1)}
+          onRestart={() => {
+            discardDraft(draftKey);
+            setRun((r) => r + 1);
+          }}
           onQuit={() => navigate(`/stories/${story.id}`)}
-          hint={<span>Type the page exactly as written. Take your time.</span>}
+          hint={
+            saveable ? (
+              <span className="flex items-center gap-1.5"><Save size={13} className="text-accent" /> Long chapter: your place is saved automatically. Use Stop &amp; save whenever you need a break.</span>
+            ) : (
+              <span>Type the page exactly as written. Take your time.</span>
+            )
+          }
           renderNotice={({ reward }) =>
             reward.bookCompleted ? (
               <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="card flex flex-wrap items-center gap-5 border-caret/50 p-5">
